@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Animal Rush: Wild Evolution - Prototype</title>
+<title>Animal Rush: Wild Evolution - Phase 2</title>
 <style>
   html, body { margin:0; padding:0; background:#1a1a2e; display:flex; align-items:center; justify-content:center; height:100%; font-family: Arial, sans-serif; }
   #game-container { box-shadow: 0 0 30px rgba(0,0,0,0.5); }
@@ -17,17 +17,210 @@
 const WIDTH = 800;
 const HEIGHT = 400;
 const GROUND_Y = 340;
-const FINISH_DISTANCE = 1500; // total distance to win
-const GAME_SPEED = 220; // px/sec world scroll speed
+const FINISH_DISTANCE = 1500;
+const BIOME_1_END = 500;   // Forest -> Snow
+const BIOME_2_END = 1000;  // Snow -> River
+const GAME_SPEED = 220;
 
-let player, cursors, spaceKey;
-let obstacles, coins;
-let scoreText, distanceText, messageText;
-let score = 0;
-let distance = 0;
-let gameOver = false;
-let gameWon = false;
-let obstacleTimer, coinTimer;
+// Animal definitions: emoji, jump power, special ability type
+const ANIMALS = {
+  rabbit:  { emoji: '🐇', name: 'Rabbit',  jumpVel: -520, ability: 'highjump', desc: 'Big jumps - great on cliffs' },
+  monkey:  { emoji: '🐒', name: 'Monkey',  jumpVel: -420, ability: 'doublejump', desc: 'Can jump twice in the air' },
+  elephant:{ emoji: '🐘', name: 'Elephant',jumpVel: -380, ability: 'smash', desc: 'Smashes rocks instead of dying' }
+};
+
+let selectedAnimal = 'rabbit';
+
+class MenuScene extends Phaser.Scene {
+  constructor() { super('MenuScene'); }
+  create() {
+    this.add.rectangle(WIDTH/2, HEIGHT/2, WIDTH, HEIGHT, 0x1a1a2e);
+    this.add.text(WIDTH/2, 60, '🏆 Animal Rush: Wild Evolution', { fontSize: '30px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5);
+    this.add.text(WIDTH/2, 100, 'Choose your animal', { fontSize: '20px', fill: '#ccc' }).setOrigin(0.5);
+
+    const keys = Object.keys(ANIMALS);
+    const startX = WIDTH/2 - ((keys.length - 1) * 180) / 2;
+
+    keys.forEach((key, i) => {
+      const a = ANIMALS[key];
+      const x = startX + i * 180;
+      const y = 200;
+
+      const box = this.add.rectangle(x, y, 150, 160, 0x333355).setStrokeStyle(3, 0x555588).setInteractive({ useHandCursor: true });
+      const emoji = this.add.text(x, y - 40, a.emoji, { fontSize: '56px' }).setOrigin(0.5);
+      const name = this.add.text(x, y + 10, a.name, { fontSize: '20px', fill: '#fff', fontStyle: 'bold' }).setOrigin(0.5);
+      const desc = this.add.text(x, y + 45, a.desc, { fontSize: '12px', fill: '#aaa', wordWrap: { width: 130 }, align: 'center' }).setOrigin(0.5);
+
+      box.on('pointerover', () => box.setFillStyle(0x4444aa));
+      box.on('pointerout', () => box.setFillStyle(0x333355));
+      box.on('pointerdown', () => {
+        selectedAnimal = key;
+        this.scene.start('GameScene');
+      });
+    });
+
+    this.add.text(WIDTH/2, 360, 'Click an animal to start the race!', { fontSize: '16px', fill: '#ffdd55' }).setOrigin(0.5);
+  }
+}
+
+class GameScene extends Phaser.Scene {
+  constructor() { super('GameScene'); }
+
+  create() {
+    this.animal = ANIMALS[selectedAnimal];
+    this.currentBiome = 'forest';
+    this.score = 0;
+    this.distance = 0;
+    this.gameOver = false;
+    this.gameWon = false;
+    this.jumpsUsed = 0;
+    this.maxJumps = this.animal.ability === 'doublejump' ? 2 : 1;
+
+    this.sky = this.add.rectangle(WIDTH/2, HEIGHT/2, WIDTH, HEIGHT, 0x87CEEB);
+    this.groundVisual = this.add.rectangle(WIDTH/2, GROUND_Y + 30, WIDTH, 60, 0x4CAF50);
+
+    const ground = this.physics.add.staticGroup();
+    const groundRect = this.add.rectangle(WIDTH/2, GROUND_Y + 10, WIDTH, 20, 0x4CAF50, 0);
+    ground.add(groundRect);
+
+    this.player = this.add.text(120, GROUND_Y - 40, this.animal.emoji, { fontSize: '48px' });
+    this.physics.add.existing(this.player);
+    this.player.body.setSize(40, 40);
+    this.player.body.setCollideWorldBounds(true);
+    this.physics.add.collider(this.player, ground, () => { this.jumpsUsed = 0; });
+
+    this.obstacles = this.physics.add.group();
+    this.coins = this.physics.add.group();
+
+    this.physics.add.overlap(this.player, this.obstacles, this.hitObstacle, null, this);
+    this.physics.add.overlap(this.player, this.coins, this.collectCoin, null, this);
+
+    this.cursors = this.input.keyboard.createCursorKeys();
+    this.spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+
+    this.animalLabel = this.add.text(16, 16, this.animal.name + ' ' + this.animal.emoji, { fontSize: '18px', fill: '#000', fontStyle: 'bold' });
+    this.scoreText = this.add.text(16, 44, 'Coins: 0', { fontSize: '20px', fill: '#000', fontStyle: 'bold' });
+    this.distanceText = this.add.text(16, 70, 'Distance: 0 / ' + FINISH_DISTANCE, { fontSize: '20px', fill: '#000', fontStyle: 'bold' });
+    this.biomeText = this.add.text(WIDTH - 16, 16, '🌳 Forest', { fontSize: '20px', fill: '#000', fontStyle: 'bold' }).setOrigin(1, 0);
+
+    this.messageText = this.add.text(WIDTH/2, HEIGHT/2, '', { fontSize: '30px', fill: '#fff', fontStyle: 'bold', backgroundColor: '#000000aa', padding: { x: 20, y: 10 }, align: 'center' });
+    this.messageText.setOrigin(0.5);
+    this.messageText.setVisible(false);
+
+    this.obstacleTimer = this.time.addEvent({ delay: 1400, callback: this.spawnObstacle, callbackScope: this, loop: true });
+    this.coinTimer = this.time.addEvent({ delay: 900, callback: this.spawnCoin, callbackScope: this, loop: true });
+
+    this.input.on('pointerdown', () => { if (this.gameOver || this.gameWon) this.scene.start('MenuScene'); });
+    this.input.keyboard.on('keydown-R', () => { if (this.gameOver || this.gameWon) this.scene.start('MenuScene'); });
+
+    this.jumpKeyWasDown = false;
+  }
+
+  currentObstacleEmoji() {
+    if (this.currentBiome === 'forest') return '🪨';
+    if (this.currentBiome === 'snow') return '❄️';
+    return '🐊';
+  }
+
+  updateBiome() {
+    let newBiome = this.currentBiome;
+    if (this.distance < BIOME_1_END) newBiome = 'forest';
+    else if (this.distance < BIOME_2_END) newBiome = 'snow';
+    else newBiome = 'river';
+
+    if (newBiome !== this.currentBiome) {
+      this.currentBiome = newBiome;
+      if (newBiome === 'snow') {
+        this.sky.setFillStyle(0xcfe8f3);
+        this.groundVisual.setFillStyle(0xffffff);
+        this.biomeText.setText('❄️ Snow');
+      } else if (newBiome === 'river') {
+        this.sky.setFillStyle(0x4a90d9);
+        this.groundVisual.setFillStyle(0x2266aa);
+        this.biomeText.setText('🌊 River');
+      }
+    }
+  }
+
+  spawnObstacle() {
+    if (this.gameOver || this.gameWon) return;
+    const rock = this.add.text(WIDTH + 20, GROUND_Y - 30, this.currentObstacleEmoji(), { fontSize: '40px' });
+    this.physics.add.existing(rock);
+    rock.body.setSize(35, 35);
+    rock.body.setAllowGravity(false);
+    rock.body.setVelocityX(-GAME_SPEED);
+    this.obstacles.add(rock);
+  }
+
+  spawnCoin() {
+    if (this.gameOver || this.gameWon) return;
+    const height = Phaser.Math.Between(0, 1) === 0 ? GROUND_Y - 30 : GROUND_Y - 110;
+    const coin = this.add.text(WIDTH + 20, height, '🪙', { fontSize: '30px' });
+    this.physics.add.existing(coin);
+    coin.body.setSize(28, 28);
+    coin.body.setAllowGravity(false);
+    coin.body.setVelocityX(-GAME_SPEED);
+    this.coins.add(coin);
+  }
+
+  hitObstacle(playerObj, obstacle) {
+    if (this.gameOver || this.gameWon) return;
+
+    if (this.animal.ability === 'smash') {
+      obstacle.destroy();
+      this.score += 1;
+      this.scoreText.setText('Coins: ' + this.score);
+      return;
+    }
+
+    this.gameOver = true;
+    this.physics.pause();
+    this.obstacleTimer.remove();
+    this.coinTimer.remove();
+    this.messageText.setText('💥 Game Over!\nCoins: ' + this.score + '\nClick or press R for menu');
+    this.messageText.setVisible(true);
+  }
+
+  collectCoin(playerObj, coin) {
+    coin.destroy();
+    this.score += 1;
+    this.scoreText.setText('Coins: ' + this.score);
+  }
+
+  update(time, delta) {
+    if (this.gameOver || this.gameWon) return;
+
+    const onGround = this.player.body.blocked.down || this.player.body.touching.down;
+    const jumpKeyDown = this.cursors.up.isDown || this.spaceKey.isDown;
+
+    if (jumpKeyDown && !this.jumpKeyWasDown) {
+      if (onGround) {
+        this.player.body.setVelocityY(this.animal.jumpVel);
+        this.jumpsUsed = 1;
+      } else if (this.jumpsUsed < this.maxJumps) {
+        this.player.body.setVelocityY(this.animal.jumpVel * 0.85);
+        this.jumpsUsed++;
+      }
+    }
+    this.jumpKeyWasDown = jumpKeyDown;
+
+    this.distance += (GAME_SPEED * delta) / 1000;
+    this.distanceText.setText('Distance: ' + Math.floor(this.distance) + ' / ' + FINISH_DISTANCE);
+    this.updateBiome();
+
+    this.obstacles.getChildren().forEach(o => { if (o.x < -50) o.destroy(); });
+    this.coins.getChildren().forEach(c => { if (c.x < -50) c.destroy(); });
+
+    if (this.distance >= FINISH_DISTANCE) {
+      this.gameWon = true;
+      this.physics.pause();
+      this.obstacleTimer.remove();
+      this.coinTimer.remove();
+      this.messageText.setText('🏁 You reached the Golden Crown!\nCoins: ' + this.score + '\nClick or press R for menu');
+      this.messageText.setVisible(true);
+    }
+  }
+}
 
 const config = {
   type: Phaser.AUTO,
@@ -39,133 +232,10 @@ const config = {
     default: 'arcade',
     arcade: { gravity: { y: 900 }, debug: false }
   },
-  scene: { preload, create, update }
+  scene: [MenuScene, GameScene]
 };
 
 new Phaser.Game(config);
-
-function preload() {
-  // No external assets needed - using emoji text objects instead
-}
-
-function create() {
-  // Sky gradient background (simple rectangles as ground/sky)
-  this.add.rectangle(WIDTH/2, HEIGHT/2, WIDTH, HEIGHT, 0x87CEEB);
-  this.add.rectangle(WIDTH/2, GROUND_Y + 30, WIDTH, 60, 0x4CAF50);
-
-  // Ground physics body (invisible, just for collision)
-  const ground = this.physics.add.staticGroup();
-  const groundRect = this.add.rectangle(WIDTH/2, GROUND_Y + 10, WIDTH, 20, 0x4CAF50, 0);
-  ground.add(groundRect);
-
-  // Player - Rabbit
-  player = this.add.text(120, GROUND_Y - 40, '🐇', { fontSize: '48px' });
-  this.physics.add.existing(player);
-  player.body.setSize(40, 40);
-  player.body.setCollideWorldBounds(true);
-  player.body.setGravityY(0); // uses world gravity
-
-  this.physics.add.collider(player, ground);
-
-  // Groups for obstacles and coins
-  obstacles = this.physics.add.group();
-  coins = this.physics.add.group();
-
-  // Collisions
-  this.physics.add.overlap(player, obstacles, hitObstacle, null, this);
-  this.physics.add.overlap(player, coins, collectCoin, null, this);
-
-  // Input
-  cursors = this.input.keyboard.createCursorKeys();
-  spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-
-  // UI
-  scoreText = this.add.text(16, 16, 'Coins: 0', { fontSize: '22px', fill: '#000', fontStyle: 'bold' });
-  distanceText = this.add.text(16, 44, 'Distance: 0 / ' + FINISH_DISTANCE, { fontSize: '22px', fill: '#000', fontStyle: 'bold' });
-  messageText = this.add.text(WIDTH/2, HEIGHT/2, '', { fontSize: '36px', fill: '#fff', fontStyle: 'bold', backgroundColor: '#000000aa', padding: {x:20,y:10} });
-  messageText.setOrigin(0.5);
-  messageText.setVisible(false);
-
-  // Spawn obstacles and coins on timers
-  obstacleTimer = this.time.addEvent({ delay: 1400, callback: spawnObstacle, callbackScope: this, loop: true });
-  coinTimer = this.time.addEvent({ delay: 900, callback: spawnCoin, callbackScope: this, loop: true });
-
-  // Restart on click/tap when game over
-  this.input.on('pointerdown', () => {
-    if (gameOver || gameWon) this.scene.restart();
-  });
-  this.input.keyboard.on('keydown-R', () => {
-    if (gameOver || gameWon) this.scene.restart();
-  });
-
-  // reset state on scene restart
-  score = 0; distance = 0; gameOver = false; gameWon = false;
-}
-
-function spawnObstacle() {
-  if (gameOver || gameWon) return;
-  const rock = this.add.text(WIDTH + 20, GROUND_Y - 30, '🪨', { fontSize: '40px' });
-  this.physics.add.existing(rock);
-  rock.body.setSize(35, 35);
-  rock.body.setAllowGravity(false);
-  rock.body.setVelocityX(-GAME_SPEED);
-  obstacles.add(rock);
-}
-
-function spawnCoin() {
-  if (gameOver || gameWon) return;
-  const height = Phaser.Math.Between(0, 1) === 0 ? GROUND_Y - 30 : GROUND_Y - 110;
-  const coin = this.add.text(WIDTH + 20, height, '🪙', { fontSize: '30px' });
-  this.physics.add.existing(coin);
-  coin.body.setSize(28, 28);
-  coin.body.setAllowGravity(false);
-  coin.body.setVelocityX(-GAME_SPEED);
-  coins.add(coin);
-}
-
-function hitObstacle(playerObj, obstacle) {
-  if (gameOver || gameWon) return;
-  gameOver = true;
-  this.physics.pause();
-  obstacleTimer.remove();
-  coinTimer.remove();
-  messageText.setText('💥 Game Over!\nCoins: ' + score + '\nClick or press R to retry');
-  messageText.setVisible(true);
-}
-
-function collectCoin(playerObj, coin) {
-  coin.destroy();
-  score += 1;
-  scoreText.setText('Coins: ' + score);
-}
-
-function update(time, delta) {
-  if (gameOver || gameWon) return;
-
-  // Jump
-  const onGround = player.body.blocked.down || player.body.touching.down;
-  if ((cursors.up.isDown || spaceKey.isDown) && onGround) {
-    player.body.setVelocityY(-480);
-  }
-
-  // Increase distance over time (simulates running speed)
-  distance += (GAME_SPEED * delta) / 1000;
-  distanceText.setText('Distance: ' + Math.floor(distance) + ' / ' + FINISH_DISTANCE);
-
-  // Clean up off-screen objects
-  obstacles.getChildren().forEach(o => { if (o.x < -50) o.destroy(); });
-  coins.getChildren().forEach(c => { if (c.x < -50) c.destroy(); });
-
-  // Win condition
-  if (distance >= FINISH_DISTANCE) {
-    gameWon = true;
-    this.physics.pause();
-    obstacleTimer.remove();
-    coinTimer.remove();
-    messageText.setText('🏁 You reached the Golden Crown!\nCoins: ' + score + '\nClick or press R to play again');
-    messageText.setVisible(true);
-  }
-}
 </script>
 </body>
 </html>
